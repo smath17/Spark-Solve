@@ -2,11 +2,10 @@ package org.apache.spark.solver
 
 import optimus.algebra.{Constraint, Expression}
 import optimus.optimization.enums.SolverLib
-import optimus.optimization.model.MPFloatVar
 import optimus.optimization.{MPModel, add}
 import org.apache.spark.sql.DataFrame
 
-class IntermediatePA(newVarCols: Seq[String], direction: Direction, objFunc: Seq[String], constraints: Seq[String], inputRelation: DataFrame) {
+class IntermediatePA(newVarCols: Seq[UnknownVariableCol], direction: Direction, objFunc: Seq[String], constraints: Seq[String], inputRelation: DataFrame) {
   def toLPModel: MPModel = {
     implicit var model: MPModel = MPModel(SolverLib.oJSolver)
     model = createModelVars(model)
@@ -17,15 +16,13 @@ class IntermediatePA(newVarCols: Seq[String], direction: Direction, objFunc: Seq
   }
 
   private def createModelVars(model: MPModel): MPModel = {
-    implicit val lpModel: MPModel = model
+    var lpModel: MPModel = model
+    val rowCount: Long = inputRelation.count()
 
-    // TODO: For this to work properly, simple constrains should be added here, i.e. var1 > 0
-    // Create variable for new columns, meaning 1 per row in the input
     for (col <- newVarCols) {
-      for (rowCount <- 0 until inputRelation.count().toInt) {
-        MPFloatVar(col + "_" + rowCount.toString)
-      }
+      lpModel = col.addModelVariables(lpModel, rowCount)
     }
+
     lpModel
   }
 

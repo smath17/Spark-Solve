@@ -15,7 +15,7 @@ case object Minimize extends Direction
 // TODO: objFunc and constraints are unsafe as the strings are not checked to conform to expected format, or for spelling
 // TODO: Problem occurs if newVarCols are substrings of each other
 // TODO: make sure constraints are limited to >=, <=, =
-case class PaProblem(newVarCols: String, direction: Direction, objFunc: String, constraints: Seq[String])
+case class PaProblem(newVarCols: Seq[UnknownVariableCol], direction: Direction, objFunc: String, constraints: Seq[String])
 
 
 object solver {
@@ -115,9 +115,9 @@ object solver {
       val relatedConstr: Array[String] = Array()
       val newObj: ArrayBuffer[String] = ArrayBuffer()
       val direction = mainProblem.direction
-      val unknownVars = mainProblem.newVarCols.split(",").map(varName => varName.trim) // Assumes var1, var2
-      val uVar = unknownVars.intersect(partition.toSeq) //  TODO: Check integrity of PaProblem
-
+      val unknownVarsInPartition = mainProblem.newVarCols.collect {
+        case unknownVariable if partition.contains(unknownVariable.name) => unknownVariable
+      }
       // Find related constraints
       for (constraint <- mainProblem.constraints) {
         // If constraint contains at least 1 id from partition it is added to new problem
@@ -151,7 +151,7 @@ object solver {
           case _ =>
         }
       }
-      new IntermediatePA(uVar, direction, newObj, relatedConstr, this.ds)
+      new IntermediatePA(unknownVarsInPartition, direction, newObj, relatedConstr, this.ds)
     }
 
     // Problem must define names of new columns aka the variables
