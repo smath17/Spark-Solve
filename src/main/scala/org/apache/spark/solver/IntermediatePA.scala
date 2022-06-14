@@ -6,6 +6,9 @@ import optimus.optimization.{MPModel, add}
 import org.apache.spark.sql.DataFrame
 
 class IntermediatePA(newVarCols: Seq[UnknownVariableCol], direction: Direction, objFunc: Seq[String], constraints: Seq[String], inputRelation: DataFrame) {
+  // Required to look up variables later
+  val modelVarIndexMap: scala.collection.mutable.Map[String, Int] = scala.collection.mutable.Map()
+
   def toLPModel: MPModel = {
     implicit var model: MPModel = MPModel(SolverLib.oJSolver)
     model = createModelVars(model)
@@ -20,71 +23,49 @@ class IntermediatePA(newVarCols: Seq[UnknownVariableCol], direction: Direction, 
     val rowCount: Long = inputRelation.count()
 
     for (col <- newVarCols) {
-      lpModel = col.addModelVariables(lpModel, rowCount)
+      lpModel = col.addModelVariables(lpModel, rowCount, modelVarIndexMap)
     }
 
     lpModel
   }
 
+  /**
+   * Splits input string into expressions of left-hand and right-hand side of the split string
+   *
+   * @param inputString   String to be split
+   * @param splitOperator String used to split input
+   * @param model         Current MPModel, used to lookup premade variables
+   * @return A pair (lhs, rhs) of type Array[Expression]
+   */
+  private def splitStringIntoExpressions(inputString: String, splitOperator: String, model: MPModel): Array[Expression] = {
+    val Array(lhs, rhs) = inputString.split(splitOperator)
+    val opsAggsNames = """[+\-*/]|SUM(.*?)\)|\w+""".r // Split into operators, aggregators, names
+    val lhsTokens = opsAggsNames.findAllIn(lhs).toList
+    val rhsTokens = opsAggsNames.findAllIn(rhs).toList
+    val lhExpr: Expression = new ExprBuilder(modelVarIndexMap, model).build(lhsTokens)
+    val rhExpr: Expression = new ExprBuilder(modelVarIndexMap, model).build(rhsTokens)
+    Array(lhExpr, rhExpr)
+  }
+
   private def createModelConstraints(model: MPModel): MPModel = {
-
-    /*
-    def stringToConstraint(model: MPModel, constrString: String, op: String): Unit = {
-      implicit val constraintModel: MPModel = model
-      MPFloatVar("x")  // Ignore IDE error. IntelliJ has troubles keeping up with many implicits
-
-
-      val Array(lhs, rhs) = constrString.split(op)
-      val lhsTokens = """[+|\-*/
-    //   ]|\w+""".r.findAllIn(lhs).toList
-    // TODO: lhs symbol rhs
-    //  get values inputRelation.col("")(i) and variables lpModel.variable(col + "_" + i.toString).get
-    // }
-
-
     implicit val lpModel: MPModel = model
 
-    for (constr <- constraints) {
-      constr match {
-        case x if x.contains(">=") => {
-          val Array(lhs, rhs) = constr.split(">=")
-          val lhsTokens = """[+|\-*/]|\w+""".r.findAllIn(lhs).toList
-          var lhExprBuilder: Expression = lhsTokens.head
-          // TODO: For each token in lhs, append to builder with appropriate operator
-          //  Special case for index 0, this should not be appended but set with =
-
-          // TODO: match for operator
-          for (token <- lhsTokens) {
-            token match {
-              case sum if sum.contains("SUM") => ???
-              case count if count.contains("COUNT") => ???
-              case name if name.matches("""[A-Za-z]""") => _
-              case _ => lhExprBuilder = lhExprBuilder + token.toDouble
-
-            }
-          }
-
-          val lhsExpr = 1 + 2
-          val dddd: Expression = lhsExpr
-          // val ddddc: Expression = ddddc + lhsExpr
-          val c: Constraint = Constraint(inputRelation.select("").collect()(0).getInt(0), optimus.algebra.ConstraintRelation.GE, 2)
-          inputRelation.collect()(0)
-          inputRelation.rdd.take(0)
-
-          // TODO: lhs symbol rhs
-          //  get values inputRelation.col("")(i) and variables lpModel.variable(col + "_" + i.toString).get
-
-        }
-        case x if x.contains("<=") => ???
-        case x if x.contains("=") => ???
-      }
-      for (rowCount <- 0 until inputRelation.count().toInt) {
-        add(lpModel.variable(rowCount.toInt).get >:= 0)
+    for (constraint <- constraints) {
+      constraint match {
+        case ge if ge.contains(">=") =>
+          val Array(lhExpr, rhExpr) = splitStringIntoExpressions(ge, ">=", lpModel)
+          add(new Constraint(lhExpr, optimus.algebra.ConstraintRelation.GE, rhExpr))
+        case le if le.contains("<=") =>
+          val Array(lhExpr, rhExpr) = splitStringIntoExpressions(le, "<=", lpModel)
+          add(new Constraint(lhExpr, optimus.algebra.ConstraintRelation.LE, rhExpr))
+        case eq if eq.contains("=") =>
+          val Array(lhExpr, rhExpr) = splitStringIntoExpressions(eq, "=", lpModel)
+          add(new Constraint(lhExpr, optimus.algebra.ConstraintRelation.EQ, rhExpr))
       }
     }
-
-    model
+    lpModel
   }
+
 
   private def createModelObjective(model: MPModel): MPModel = ???
 
