@@ -41,7 +41,6 @@ case class UnknownVariableCol(name: String, min: Double, max: Double) {
       this.toModelVariable(model, i.toString)
       indexMap += ((name + "_" + i.toString) -> (indexMap.size + 1)) // TODO: Make sure map is updated, else return updated map
     }
-
     model
   }
 }

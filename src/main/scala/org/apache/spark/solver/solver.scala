@@ -1,5 +1,6 @@
 package org.apache.spark.solver
 
+import optimus.optimization.{MPModel, objectiveValue, release, start}
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.functions.lit
 
@@ -135,7 +136,7 @@ object solver {
           // If current is SUM and next contains related IDs => collect both as related objective
           case "SUM" | "COUNT" => if (partition.exists(idFromPar => objSplit(i + 1).contains(idFromPar))) {
             // If the objective already consist of elements, the operator is required
-            if (newObj.length > 1) {
+            if (i > 1 && i < objSplit.size) {
               newObj += (objSplit(i - 1), currentSplit, objSplit(i + 1))
             }
             else {
@@ -158,25 +159,52 @@ object solver {
     // constraint and objective can be given by selects?
     def solve(mainProblem: PaProblem): Unit = {
       // Objective given as (Agg, Column, Operator, newCol: String)
-      val data = this.ds
+      var data = this.ds
 
-
-      data.col("order")
-      data.collect()
-      data.first()
-
-      val rows = data.select("order")
-      for (row <- rows) {
-      }
       data.withColumn("result", lit(None))
 
 
       // 1. Partition input into sub-problems
       val partitions: Set[Set[String]] = partition(mainProblem.objFunc, mainProblem.constraints)
+
       // 2. Build sub-problems from partitions
       val subProblems: Seq[IntermediatePA] = buildAllSubs(partitions, mainProblem)
+
       // 3. Send to solver, collect result
+      // TODO: distribute this
+      val objectiveValues: ArrayBuffer[Double] = scala.collection.mutable.ArrayBuffer()
+      val columnValues: ArrayBuffer[Double] = scala.collection.mutable.ArrayBuffer()
+      val nameToColumn: scala.collection.mutable.Map[String, Array[Double]] = scala.collection.mutable.Map()
+      for (sub <- subProblems) {
+        implicit val model: MPModel = sub.toLPModel
+        start()
+        objectiveValues += objectiveValue
+        for (col <- sub.newVarCols) {
+          for (row <- data.collect().indices) {
+            val optionValue = model.variable(sub.modelVarIndexMap(col.name + "_" + row)).get.value
+            optionValue match {
+              case Some(x) => columnValues += x
+              case None => columnValues += 0
+            }
+          }
+          nameToColumn(col.name) = columnValues.toArray
+          columnValues.clear()
+        }
+
+        // println(s"objective: $objectiveValue")
+        //println(s"x = ${x.value} y = ${y.value}")
+
+        release()
+      }
+
       // 4. Return result
+      // Should be returned as new dataframe with additional column, however not possible to add column with varying values
+      // TODO: append missing columns with null values, then union dataframes
+      //  https://stackoverflow.com/questions/39758045/how-to-perform-union-on-two-dataframes-with-different-amounts-of-columns-in-spar
+      for (col <- mainProblem.newVarCols) {
+        println(nameToColumn(col.name).mkString(col.name + ":" + " ", "\n", "End of column"))
+      }
+      println(objectiveValues.sum)
     }
   }
 }
