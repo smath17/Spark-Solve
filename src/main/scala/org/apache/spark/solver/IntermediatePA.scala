@@ -5,7 +5,7 @@ import optimus.optimization.enums.SolverLib
 import optimus.optimization.{MPModel, add, maximize, minimize}
 import org.apache.spark.sql.DataFrame
 
-class IntermediatePA(val newVarCols: Seq[UnknownVariableCol], direction: Direction, objFunc: Seq[String], constraints: Seq[String], inputRelation: DataFrame) {
+case class IntermediatePA(val newVarCols: Seq[UnknownVariableCol], direction: Direction, objFunc: Seq[String], constraints: Seq[String], inputRelation: DataFrame) {
   // Required to look up variables later
   val modelVarIndexMap: scala.collection.mutable.Map[String, Int] = scala.collection.mutable.Map()
 

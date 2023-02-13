@@ -1,11 +1,13 @@
 package org.apache.spark.solver
 
 import optimus.optimization.{MPModel, objectiveValue, release, start}
+import org.apache.spark.SparkContext
 import org.apache.spark.sql.DataFrame
-import org.apache.spark.sql.functions.lit
 
+import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.language.postfixOps
+
 
 sealed trait Direction
 
@@ -54,7 +56,7 @@ object solver {
 
       var idSets: Set[Set[String]] = Set()
       // TODO: Don't exclude words
-      val pattern = """\b([A-Za-z]+)\b(?<!EQ|GE|LE)""".r // Match any word excluding EQ, GE, LE
+      val pattern = """\b([A-Za-z_]+)\b(?<!EQ|GE|LE|SUM)""".r // Match any word excluding EQ, GE, LE
 
       // Check if reserved names are used
       constraints.foreach(constraint => verifyInputNames(constraint))
@@ -67,10 +69,16 @@ object solver {
       }
       // Append id sets from objective, sets of length 1 are excluded. Loosely based on parentheses
       val objSplits = splitObjByParen(objective)
-      //.filter(varSet => varSet.length > 1)
-      objSplits.foreach(set => idSets += pattern.findAllIn(set).toSet.filter(idSet => idSet.length > 1))
+      // objSplits.foreach(split => idSets += pattern.findAllIn(split).toSet)
+      for (split <- objSplits) {
+        val ids = pattern.findAllIn(split).toSet
+        if (ids.nonEmpty) {
+          idSets += ids
+        }
+      }
 
       // Create and return disjoint partitions
+      println("Problem partitioning done!")
       mergeIntersectingSets(idSets)
     }
 
@@ -91,13 +99,19 @@ object solver {
       // Regex pattern to split string into parentheses and
       // any that is not whitespace or parentheses (literals, variable names)
       val parenNotSpacePattern = """(\(|\)|[^\s()]+)""".r
-      val splitObj = parenNotSpacePattern.findAllIn(obj).toBuffer
+      var splitObj = parenNotSpacePattern.findAllIn(obj).toBuffer
       // Merge splits based on matching parentheses
-      for (i <- splitObj.indices) {
-        val notEqParens = splitObj(i).count(_ == '(') == splitObj(i).count(_ == ')')
+      var i = 0
+      while (i < splitObj.length) {
+        val notEqParens = splitObj(i).count(_ == '(') != splitObj(i).count(_ == ')') && splitObj(i).contains("(")
         if (notEqParens) {
-          splitObj(i + 1) = splitObj(i) + splitObj(i + 1)
+          // concat current into next
+          splitObj = splitObj.updated(i + 1, splitObj(i) + splitObj(i + 1))
+          // remove current
           splitObj.remove(i)
+        }
+        else {
+          i += 1
         }
       }
       splitObj
@@ -106,9 +120,14 @@ object solver {
     def buildAllSubs(partitions: Set[Set[String]], mainProblem: PaProblem): Seq[IntermediatePA] = {
       val res: Seq[IntermediatePA] = Seq()
       val objSplit = splitObjByParen(mainProblem.objFunc)
+      var probNumber = 1
+      println("Initializing " + partitions.size + " sub-problems")
       for (partit <- partitions) {
         res :+ buildSub(partit, mainProblem, objSplit)
+        println("Sub-problem " + probNumber + " built!")
+        probNumber += 1
       }
+      println("All sub-problems built successfully")
       res
     }
 
@@ -134,7 +153,7 @@ object solver {
         val currentSplit = objSplit(i)
         currentSplit match {
           // If current is SUM and next contains related IDs => collect both as related objective
-          case "SUM" | "COUNT" => if (partition.exists(idFromPar => objSplit(i + 1).contains(idFromPar))) {
+          case "SUM" => if (partition.exists(idFromPar => objSplit(i + 1).contains(idFromPar))) {
             // If the objective already consist of elements, the operator is required
             if (i > 1 && i < objSplit.size) {
               newObj += (objSplit(i - 1), currentSplit, objSplit(i + 1))
@@ -142,26 +161,49 @@ object solver {
             else {
               newObj += (currentSplit, objSplit(i + 1))
             }
-            // Increment twice to account for (i + 1)
-            i += 2
           }
+          // Increment twice to account since either (i, i + 1) is appended or it is not useful
+          i += 2
           // If current is in partition
           case split if partition.exists(idFromPar => split.contains(idFromPar)) =>
             newObj += split
             i += 1
-          case _ =>
+          case _ => i += 1
         }
       }
-      new IntermediatePA(unknownVarsInPartition, direction, newObj, relatedConstr, this.ds)
+      // TODO: reduce size of input relation by selecting cols used in problem
+      IntermediatePA(unknownVarsInPartition, direction, newObj, relatedConstr, this.ds)
+    }
+
+    // Returns seq of double, first is the objective value, rest are column values
+    private def solve(subProblem: IntermediatePA): mutable.Map[String, Array[Double]] = {
+      var objValue: Double = 0
+      val tempColumnValues: ArrayBuffer[Double] = scala.collection.mutable.ArrayBuffer()
+      val nameToColumn: scala.collection.mutable.Map[String, Array[Double]] = scala.collection.mutable.Map()
+      implicit val model: MPModel = subProblem.toLPModel
+      start()
+      objValue = objectiveValue
+      for (col <- subProblem.newVarCols) {
+        for (row <- subProblem.inputRelation.collect().indices) {
+          val optionValue = model.variable(subProblem.modelVarIndexMap(col.name + "_" + row)).get.value
+          optionValue match {
+            case Some(x) => tempColumnValues += x
+            case None => tempColumnValues += 0
+          }
+        }
+        nameToColumn(col.name) = tempColumnValues.toArray
+        tempColumnValues.clear()
+      }
+      release()
+      nameToColumn
     }
 
     // Problem must define names of new columns aka the variables
     // constraint and objective can be given by selects?
-    def solve(mainProblem: PaProblem): Unit = {
+    def findSolution(mainProblem: PaProblem, sc: SparkContext): Unit = {
       // Objective given as (Agg, Column, Operator, newCol: String)
-      var data = this.ds
 
-      data.withColumn("result", lit(None))
+      // data.withColumn("result", lit(None))
 
 
       // 1. Partition input into sub-problems
@@ -169,42 +211,27 @@ object solver {
 
       // 2. Build sub-problems from partitions
       val subProblems: Seq[IntermediatePA] = buildAllSubs(partitions, mainProblem)
+      println(subProblems)
 
       // 3. Send to solver, collect result
-      // TODO: distribute this
-      val objectiveValues: ArrayBuffer[Double] = scala.collection.mutable.ArrayBuffer()
-      val columnValues: ArrayBuffer[Double] = scala.collection.mutable.ArrayBuffer()
-      val nameToColumn: scala.collection.mutable.Map[String, Array[Double]] = scala.collection.mutable.Map()
-      for (sub <- subProblems) {
-        implicit val model: MPModel = sub.toLPModel
-        start()
-        objectiveValues += objectiveValue
-        for (col <- sub.newVarCols) {
-          for (row <- data.collect().indices) {
-            val optionValue = model.variable(sub.modelVarIndexMap(col.name + "_" + row)).get.value
-            optionValue match {
-              case Some(x) => columnValues += x
-              case None => columnValues += 0
-            }
-          }
-          nameToColumn(col.name) = columnValues.toArray
-          columnValues.clear()
-        }
+      println("Begin solving")
+      val distQueries = sc.parallelize(subProblems, numSlices = 2)
+      val subSolutions = distQueries.map(sub => solve(sub)).collect()
+      println("Solving done!")
 
-        // println(s"objective: $objectiveValue")
-        //println(s"x = ${x.value} y = ${y.value}")
+      // Concatenate maps
+      val nameToSolution = subSolutions.reduce(_.++(_))
 
-        release()
-      }
 
       // 4. Return result
       // Should be returned as new dataframe with additional column, however not possible to add column with varying values
       // TODO: append missing columns with null values, then union dataframes
       //  https://stackoverflow.com/questions/39758045/how-to-perform-union-on-two-dataframes-with-different-amounts-of-columns-in-spar
       for (col <- mainProblem.newVarCols) {
-        println(nameToColumn(col.name).mkString(col.name + ":" + " ", "\n", "End of column"))
+        println(col.name + "\n Start")
+        println(nameToSolution(col.name).mkString("", "\n", "End of column"))
+        println(col.name + "End \n")
       }
-      println(objectiveValues.sum)
     }
   }
 }

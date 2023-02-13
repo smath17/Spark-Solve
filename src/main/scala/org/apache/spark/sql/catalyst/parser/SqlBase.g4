@@ -529,6 +529,7 @@ querySpecification
       aggregationClause?
       havingClause?
       windowClause?                                                         #regularQuerySpecification
+    | solveClause objectiveClause subjecttoClause                           #solveQuerySpecification
     ;
 
 transformClause
@@ -545,6 +546,22 @@ transformClause
 
 selectClause
     : SELECT (hints+=hint)* setQuantifier? namedExpressionSeq
+    ;
+
+selectFromHelper
+    : '(' selectClause fromClause ')'
+    ;
+
+solveClause
+    : SOLVESELECT namedExpressionSeq //IN selectFromHelper
+    ;
+
+objectiveClause
+    : direction=(MAXIMIZE | MINIMIZE) selectFromHelper
+    ;
+
+subjecttoClause
+    : SUBJECTTO selectFromHelper (',' selectFromHelper)*
     ;
 
 setClause
@@ -1736,6 +1753,10 @@ WHERE: 'WHERE';
 WINDOW: 'WINDOW';
 WITH: 'WITH';
 ZONE: 'ZONE';
+SOLVESELECT: 'SOLVESELECT';
+MAXIMIZE: 'MAXIMIZE';
+MINIMIZE: 'MINIMIZE';
+SUBJECTTO: 'SUBJECTTO';
 //--SPARK-KEYWORD-LIST-END
 //============================
 // End of the keywords list

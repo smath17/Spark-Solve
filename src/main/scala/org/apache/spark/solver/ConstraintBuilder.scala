@@ -48,7 +48,7 @@ class ConstraintBuilder(modelVarMap: scala.collection.mutable.Map[String, Int], 
   }
 
   // Aggregate only 1 side of the constraint
-  private def createGlobalConstraint(tokens: String, lhsAgg: Boolean): Unit = {
+  private def createGlobalConstraint(tokens: String, lhsAgg: Boolean): Constraint = {
     val sideToAggregate: ArrayBuffer[Expression] = ArrayBuffer()
     var sideLiteral: Expression = null
     var side: Int = 0
